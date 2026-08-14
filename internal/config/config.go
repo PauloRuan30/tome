@@ -16,6 +16,7 @@ func Load() map[string]any {
 	}
 
 	cfgPath := filepath.Join(cfgDir, "tome")
+	os.Mkdir(cfgPath, 0755)
 	viper.AddConfigPath(cfgPath)
 	viper.SetConfigName("config")
 	viper.SetConfigType("yaml")
@@ -25,6 +26,8 @@ func Load() map[string]any {
 	if err := viper.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 			slog.Warn("Error reading config", "err", err)
+		} else {
+			slog.Info("No config.yaml found, using defaults. Create one at: " + filepath.Join(cfgPath, "config.yaml"))
 		}
 	}
 

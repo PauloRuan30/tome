@@ -2,9 +2,13 @@ module github.com/PauloRuan30/tome
 
 go 1.26.5
 
-require github.com/spf13/viper v1.18.2
+require (
+	github.com/gen2brain/go-fitz v1.28.2
+	github.com/spf13/viper v1.18.2
+)
 
 require (
+	github.com/ebitengine/purego v0.10.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect

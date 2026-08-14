@@ -20,15 +20,19 @@ type BookInfo struct {
 
 // Parse opens a PDF, extracts metadata and the first page as a JPEG.
 func Parse(filePath string, hash string) (*BookInfo, []byte, error) {
-	doc, err := fitz.Open(filePath)
+	doc, err := fitz.New(filePath)
 	if err != nil {
 		return nil, nil, err
 	}
 	defer doc.Close()
 
+	cleanStrings := func(s string) string {
+		return strings.TrimSpace(strings.ReplaceAll(s, "\x00", ""))
+	}
+
 	info := &BookInfo{
-		Title:     doc.MetaData("title"),
-		Author:    doc.MetaData("author"),
+		Title:     cleanStrings(doc.Metadata()["title"]),
+		Author:    cleanStrings(doc.Metadata()["author"]),
 		PageCount: doc.NumPage(),
 		FilePath:  filePath,
 		Hash:      hash,
@@ -56,7 +60,7 @@ func Parse(filePath string, hash string) (*BookInfo, []byte, error) {
 
 // RenderPage is used later for the Reader mode to render specific pages.
 func RenderPage(filePath string, pageNum int) (*bytes.Buffer, error) {
-	doc, err := fitz.Open(filePath)
+	doc, err := fitz.New(filePath)
 	if err != nil {
 		return nil, err
 	}

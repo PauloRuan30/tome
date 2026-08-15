@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -72,7 +73,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case ReaderClosedMsg:
 		m.mode = modeGrid
-		m.pane.SetBook(m.currentBooks()[m.selected]) // refresh progress line
+		m.grid.InvalidatePaint() // force cover repaint
+		m.pane.SetBook(m.currentBooks()[m.selected])
 		return m, nil
 
 	case tea.KeyMsg:
@@ -176,8 +178,9 @@ func (m Model) View() string {
 		bar = barStyle.Render(" /search: " + m.search.Query() + "█   (enter=apply  esc=clear)")
 	} else {
 		bar = barStyle.Render(fmt.Sprintf(
-			" term:%dx%d | sel:%d | scroll:%d | books:%d/%d | filter:%q ",
-			m.width, m.height, m.selected, m.grid.scrollRow,
+			" term:%dx%d (%s) | sel:%d | scroll:%d | books:%d/%d | filter:%q ",
+			m.width, m.height, os.Getenv("TERM"),
+			m.selected, m.grid.scrollRow,
 			len(m.currentBooks()), len(m.allBooks), m.filter))
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, body, bar)

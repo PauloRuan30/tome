@@ -1,12 +1,14 @@
 package tui
 
 import (
-	"github.com/PauloRuan30/tome/internal/pdf"
+	"fmt"
+
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/PauloRuan30/tome/internal/pdf"
 )
 
-// Book represents a fully parsed book ready for the UI
 type Book struct {
 	Info  *pdf.BookInfo
 	Cover []byte
@@ -15,16 +17,18 @@ type Book struct {
 type Model struct {
 	books    []Book
 	grid     GridModel
+	pane     PaneModel
 	width    int
 	height   int
 	selected int
 }
 
 func InitialModel(books []Book) Model {
-	return Model{
-		books: books,
-		grid:  NewGridModel(books),
+	m := Model{books: books, grid: NewGridModel(books), pane: NewPaneModel()}
+	if len(books) > 0 {
+		m.pane.SetBook(books[0])
 	}
+	return m
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -34,11 +38,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// 70% width for grid, 30% for sidebar
-		m.grid.width = int(float64(msg.Width) * 0.7)
-		m.grid.height = msg.Height
-		m.grid, _ = m.grid.Update(msg)
-		return m, nil
+
+		gridWidth := int(float64(msg.Width) * 0.70)
+		m.grid.width = gridWidth
+		m.grid.height = msg.Height - 1 // reserve 1 line for debug bar
+		m.pane.width = msg.Width - gridWidth
+		m.pane.height = msg.Height - 1
+
+		var c1, c2 tea.Cmd
+		m.grid, c1 = m.grid.Update(msg)
+		m.pane, c2 = m.pane.Update(msg)
+		return m, tea.Batch(c1, c2)
 
 	case tea.KeyMsg:
 		if msg.String() == "q" || msg.String() == "ctrl+c" {
@@ -49,24 +59,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.grid, cmd = m.grid.Update(msg)
 
-	// Sync selected index from grid to main model
-	m.selected = m.grid.Selected()
-
+	if m.grid.Selected() != m.selected {
+		m.selected = m.grid.Selected()
+		if m.selected >= 0 && m.selected < len(m.books) {
+			m.pane.SetBook(m.books[m.selected])
+		}
+	}
 	return m, cmd
 }
 
 func (m Model) View() string {
-	// Left Pane: Grid
-	gridView := m.grid.View()
+	body := lipgloss.JoinHorizontal(lipgloss.Top, m.grid.View(), m.pane.View())
 
-	// Right Pane: Placeholder Sidebar (We will build this in Step 4)
-	sidebarWidth := m.width - m.grid.width
-	sidebar := PaneStyle.Width(sidebarWidth - 4).Render(
-		TitleStyle.Render("Metadata Sidebar") + "\n\n" +
-			"Select a book to see details.\n\n" +
-			"[q] Quit",
+	// 🔍 DEBUG BAR — tells us the internal state in every screenshot
+	status := fmt.Sprintf(
+		" term:%dx%d | gridW:%d paneW:%d | cols:%d | sel:%d | scroll:%d | books:%d ",
+		m.width, m.height, m.grid.width, m.pane.width,
+		m.grid.cols, m.selected, m.grid.scrollRow, len(m.books),
 	)
+	bar := lipgloss.NewStyle().
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("255")).
+		Render(status)
 
-	// Join them horizontally (Split Screen)
-	return lipgloss.JoinHorizontal(lipgloss.Top, gridView, sidebar)
+	return lipgloss.JoinVertical(lipgloss.Left, body, bar)
 }

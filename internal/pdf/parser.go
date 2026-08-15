@@ -9,7 +9,6 @@ import (
 	"github.com/gen2brain/go-fitz"
 )
 
-// BookInfo holds the extracted metadata of a PDF.
 type BookInfo struct {
 	Title     string
 	Author    string
@@ -18,7 +17,28 @@ type BookInfo struct {
 	Hash      string
 }
 
-// Parse opens a PDF, extracts metadata and the first page as a JPEG.
+func cleanStr(s string) string {
+	return strings.TrimSpace(strings.ReplaceAll(s, "\x00", ""))
+}
+
+func extractInfo(doc *fitz.Document, filePath, hash string) *BookInfo {
+	meta := doc.Metadata()
+	info := &BookInfo{
+		Title:     cleanStr(meta["title"]),
+		Author:    cleanStr(meta["author"]),
+		PageCount: doc.NumPage(),
+		FilePath:  filePath,
+		Hash:      hash,
+	}
+	if info.Title == "" || info.Title == "Untitled" {
+		base := filepath.Base(filePath)
+		info.Title = strings.TrimSuffix(base, filepath.Ext(base))
+	}
+	return info
+}
+
+// Parse renders the cover at 72 DPI. That's plenty for a terminal
+// thumbnail and ~10x faster than the 300 DPI default.
 func Parse(filePath string, hash string) (*BookInfo, []byte, error) {
 	doc, err := fitz.New(filePath)
 	if err != nil {
@@ -26,39 +46,29 @@ func Parse(filePath string, hash string) (*BookInfo, []byte, error) {
 	}
 	defer doc.Close()
 
-	cleanStrings := func(s string) string {
-		return strings.TrimSpace(strings.ReplaceAll(s, "\x00", ""))
-	}
+	info := extractInfo(doc, filePath, hash)
 
-	info := &BookInfo{
-		Title:     cleanStrings(doc.Metadata()["title"]),
-		Author:    cleanStrings(doc.Metadata()["author"]),
-		PageCount: doc.NumPage(),
-		FilePath:  filePath,
-		Hash:      hash,
-	}
-
-	// Fallback to filename if PDF metadata is empty
-	if info.Title == "" || info.Title == "Untitled" {
-		base := filepath.Base(filePath)
-		info.Title = strings.TrimSuffix(base, filepath.Ext(base))
-	}
-
-	// Extract the cover
-	img, err := doc.Image(0)
+	img, err := doc.ImageDPI(0, 72)
 	if err != nil {
-		// Return info even if cover extraction fails
 		return info, nil, nil
 	}
 
 	var buf bytes.Buffer
-	// Compress to JPEG to save memory and disk space
-	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 75})
-
+	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80})
 	return info, buf.Bytes(), nil
 }
 
-// RenderPage is used later for the Reader mode to render specific pages.
+// ParseMetadataOnly skips image rendering entirely (used on cache hits).
+func ParseMetadataOnly(filePath string, hash string) (*BookInfo, error) {
+	doc, err := fitz.New(filePath)
+	if err != nil {
+		return nil, err
+	}
+	defer doc.Close()
+	return extractInfo(doc, filePath, hash), nil
+}
+
+// RenderPage keeps a higher DPI for the actual Reader (Step 5).
 func RenderPage(filePath string, pageNum int) (*bytes.Buffer, error) {
 	doc, err := fitz.New(filePath)
 	if err != nil {
@@ -70,7 +80,7 @@ func RenderPage(filePath string, pageNum int) (*bytes.Buffer, error) {
 		return nil, nil
 	}
 
-	img, err := doc.Image(pageNum)
+	img, err := doc.ImageDPI(pageNum, 110)
 	if err != nil {
 		return nil, err
 	}

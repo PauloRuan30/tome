@@ -9,31 +9,42 @@ import (
 	"strings"
 )
 
-// checks if the terminal emulator supports the Kitty Graphics Protocol.
+// SupportsKitty detects terminals with the Kitty Graphics Protocol.
+// NOTE: Konsole does NOT support it — it correctly uses the ANSI fallback.
 func SupportsKitty() bool {
 	term := os.Getenv("TERM")
 	termProgram := os.Getenv("TERM_PROGRAM")
 	return strings.Contains(term, "kitty") ||
 		strings.Contains(termProgram, "kitty") ||
-		strings.Contains(termProgram, "wezterm") ||
-		strings.Contains(term, "konsole")
+		strings.Contains(termProgram, "wezterm")
 }
 
-// KittyImage formats a JPEG into the Kitty Graphics Protocol ANSI escape sequence.
+// KittyImage encodes a JPEG per the Kitty Graphics Protocol:
+//   - payloads > 4096 bytes MUST be chunked (m=1 ... m=0)
+//   - q=2 silences terminal ACK responses (keeps Bubble Tea's input clean)
+//   - trailing spaces reserve the layout slot in the TUI
 func KittyImage(imgData []byte, cols, rows int) string {
 	b64 := base64.StdEncoding.EncodeToString(imgData)
 
-	// a=T (display and store), f=100 (JPEG), c=cols, r=rows
-	seq := fmt.Sprintf("\x1b_Ga=T,f=100,c=%d,r=%d;%s\x1b\\", cols, rows, b64)
-
 	var sb strings.Builder
-	sb.WriteString(seq)
-
-	// We must print placeholder spaces so the TUI layout engine knows how much space the image takes
-	for y := 0; y < rows; y++ {
-		for x := 0; x < cols; x++ {
-			sb.WriteString(" ")
+	const chunk = 4096
+	for i := 0; i < len(b64); i += chunk {
+		end := min(i+chunk, len(b64))
+		m := 0 // 0 = final chunk
+		if end < len(b64) {
+			m = 1 // 1 = more chunks follow
 		}
+		if i == 0 {
+			sb.WriteString(fmt.Sprintf(
+				"\x1b_Ga=T,f=100,c=%d,r=%d,q=2,m=%d;%s\x1b\\", cols, rows, m, b64[i:end]))
+		} else {
+			sb.WriteString(fmt.Sprintf("\x1b_Gm=%d;%s\x1b\\", m, b64[i:end]))
+		}
+	}
+
+	// Layout placeholder so Lipgloss reserves the exact image area
+	for y := 0; y < rows; y++ {
+		sb.WriteString(strings.Repeat(" ", cols))
 		if y < rows-1 {
 			sb.WriteString("\n")
 		}
@@ -59,9 +70,7 @@ func ANSIBlockArt(imgData []byte, cols int) string {
 	var sb strings.Builder
 	for y := 0; y < rows; y++ {
 		for x := 0; x < cols; x++ {
-			// Map terminal grid (x,y) to image pixel coordinates
 			origX := x * bounds.Dx() / cols
-
 			origY1 := (y * 2) * bounds.Dy() / (rows * 2)
 			origY2 := (y*2 + 1) * bounds.Dy() / (rows * 2)
 
@@ -70,13 +79,12 @@ func ANSIBlockArt(imgData []byte, cols int) string {
 
 			r1, g1, b1, _ := c1.RGBA()
 			r2, g2, b2, _ := c2.RGBA()
-
 			r1, g1, b1 = r1>>8, g1>>8, b1>>8
 			r2, g2, b2 = r2>>8, g2>>8, b2>>8
 
-			sb.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm▀\x1b[0m", r1, g1, b1, r2, g2, b2))
+			sb.WriteString(fmt.Sprintf("\x1b[38;2;%d;%d;%d;48;2;%d;%d;%dm▀", r1, g1, b1, r2, g2, b2))
 		}
-		sb.WriteString("\n")
+		sb.WriteString("\x1b[0m\n")
 	}
 	return sb.String()
 }

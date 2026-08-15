@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -10,47 +11,100 @@ import (
 )
 
 type GridModel struct {
-	books    []Book
-	cols     int
-	selected int
-	width    int
-	height   int
+	books     []Book
+	cols      int
+	selected  int
+	width     int
+	height    int
+	scrollRow int // first visible grid row (the viewport)
+
+	artCache map[string]string
 }
 
 func NewGridModel(books []Book) GridModel {
-	return GridModel{books: books, cols: 3}
+	return GridModel{books: books, cols: 3, artCache: make(map[string]string)}
 }
 
 func (m GridModel) Selected() int { return m.selected }
 
-// coverCols: how many terminal columns wide each cover art should be.
-// Scales with the window => sharper art on bigger terminals.
 func (m GridModel) coverCols() int {
-	c := (m.width / m.cols) - 8 // reserve space for padding + border
+	c := (m.width / m.cols) - 8
 	if c < 20 {
 		c = 20
 	}
-	if c > 60 {
-		c = 60
+	if c > 40 {
+		c = 40
 	}
 	return c
 }
+func (m GridModel) coverRows() int { return int(float64(m.coverCols()) * 0.7) }
+func (m GridModel) cellH() int     { return m.coverRows() + 5 }
+func (m GridModel) totalRows() int { return (len(m.books) + m.cols - 1) / m.cols }
 
-// coverRows: A4 pages have a ~1.414 h/w ratio; a terminal char is ~2x tall
-// as wide, so rows ≈ cols * 0.7.
-func (m GridModel) coverRows() int {
-	return int(float64(m.coverCols()) * 0.7)
+func (m GridModel) visibleRows() int {
+	v := m.height / m.cellH()
+	if v < 1 {
+		v = 1
+	}
+	return v
 }
 
-// cellH: total terminal rows one grid slot occupies (cover + title + chrome).
-func (m GridModel) cellH() int {
-	return m.coverRows() + 5
+func (m GridModel) maxScroll() int {
+	max := m.totalRows() - m.visibleRows()
+	if max < 0 {
+		max = 0
+	}
+	return max
+}
+
+func (m GridModel) clampScroll() GridModel {
+	if m.scrollRow < 0 {
+		m.scrollRow = 0
+	}
+	if m.scrollRow > m.maxScroll() {
+		m.scrollRow = m.maxScroll()
+	}
+	return m
+}
+
+// keepSelectedVisible makes keyboard navigation follow the selection.
+func (m GridModel) keepSelectedVisible() GridModel {
+	row := m.selected / m.cols
+	if row < m.scrollRow {
+		m.scrollRow = row
+	}
+	if row >= m.scrollRow+m.visibleRows() {
+		m.scrollRow = row - m.visibleRows() + 1
+	}
+	return m.clampScroll()
+}
+
+func (m GridModel) coverArt(book Book, cols int) string {
+	key := fmt.Sprintf("%s-%d", book.Info.Hash, cols)
+	if art, ok := m.artCache[key]; ok {
+		return art
+	}
+
+	var art string
+	switch {
+	case book.Cover == nil:
+		art = lipgloss.Place(cols, m.coverRows(), lipgloss.Center, lipgloss.Center, "[No Cover]")
+	case pdf.SupportsKitty():
+		art = pdf.KittyImage(book.Cover, cols, m.coverRows())
+	default:
+		art = pdf.ANSIBlockArt(book.Cover, cols)
+	}
+
+	if len(m.artCache) > 64 {
+		m.artCache = make(map[string]string)
+	}
+	m.artCache[key] = art
+	return art
 }
 
 func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		// Responsive reflow: more width => more columns
 		switch {
 		case m.width > 140:
 			m.cols = 4
@@ -61,6 +115,7 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 		default:
 			m.cols = 1
 		}
+		return m.clampScroll(), nil
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -81,6 +136,7 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 				m.selected += m.cols
 			}
 		}
+		return m.keepSelectedVisible(), nil
 
 	case tea.MouseMsg:
 		if msg.Action != tea.MouseActionPress {
@@ -88,34 +144,24 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 		}
 		switch msg.Button {
 		case tea.MouseButtonWheelDown:
-			if m.selected+m.cols < len(m.books) {
-				m.selected += m.cols
-			}
+			m.scrollRow++ // wheel scrolls the VIEW now
 		case tea.MouseButtonWheelUp:
-			if m.selected >= m.cols {
-				m.selected -= m.cols
-			}
+			m.scrollRow--
 		case tea.MouseButtonLeft:
-			// 1. Ignore clicks that land in the sidebar (right 30%)
 			if msg.X >= m.width {
 				return m, nil
 			}
-			// 2. Map X/Y to a grid slot
-			cellW := m.width / m.cols
-			col := msg.X / cellW
-			row := msg.Y / m.cellH()
-
-			// 3. Ignore clicks in the empty gutter at the end of a row
+			col := msg.X / (m.width / m.cols)
 			if col >= m.cols {
 				return m, nil
 			}
-
+			row := m.scrollRow + msg.Y/m.cellH() // click maps through the viewport
 			idx := row*m.cols + col
-			// 4. Ignore clicks on empty space below the last book
 			if idx >= 0 && idx < len(m.books) {
 				m.selected = idx
 			}
 		}
+		return m.clampScroll(), nil
 	}
 	return m, nil
 }
@@ -124,28 +170,25 @@ func (m GridModel) View() string {
 	if len(m.books) == 0 {
 		return "No PDFs found in this directory."
 	}
-
+	m = m.clampScroll()
 	coverCols := m.coverCols()
-	coverRows := m.coverRows()
+
+	// Render ONLY the visible slice of the library (the viewport)
+	first := m.scrollRow * m.cols
+	last := (m.scrollRow + m.visibleRows()) * m.cols
+	if last > len(m.books) {
+		last = len(m.books)
+	}
 
 	var cells []string
-	for i, book := range m.books {
+	for i := first; i < last; i++ {
+		book := m.books[i]
 		style := CellStyle
 		if i == m.selected {
 			style = ActiveCellStyle
 		}
 
-		var coverView string
-		if book.Cover != nil {
-			if pdf.SupportsKitty() {
-				coverView = pdf.KittyImage(book.Cover, coverCols, coverRows)
-			} else {
-				// Higher resolution now: scales with terminal width
-				coverView = pdf.ANSIBlockArt(book.Cover, coverCols)
-			}
-		} else {
-			coverView = lipgloss.Place(coverCols, coverRows, lipgloss.Center, lipgloss.Center, "[No Cover]")
-		}
+		coverView := m.coverArt(book, coverCols)
 
 		title := book.Info.Title
 		if len(title) > coverCols-3 {
@@ -166,5 +209,8 @@ func (m GridModel) View() string {
 		grid.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, cells[i:end]...) + "\n")
 	}
 
+	if m.maxScroll() > 0 {
+		grid.WriteString(fmt.Sprintf(" ⇕ row %d/%d", m.scrollRow+1, m.maxScroll()+1))
+	}
 	return grid.String()
 }

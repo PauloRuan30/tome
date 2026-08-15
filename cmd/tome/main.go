@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
 
 	"github.com/PauloRuan30/tome/internal/cache"
 	"github.com/PauloRuan30/tome/internal/config"
@@ -46,35 +49,77 @@ func main() {
 		os.Exit(1)
 	}
 
-	var books []tui.Book
-	for _, path := range files {
-		hash, err := cache.HashFile(path)
-		if err != nil {
-			continue
-		}
-
-		var cover []byte
-		if cached, err := cache.LoadCover(hash); err == nil {
-			cover = cached
-		} else {
-			_, cover, _ = pdf.Parse(path, hash)
-			if cover != nil {
-				cache.SaveCover(hash, cover)
-			}
-		}
-
-		// We need the info for the UI, so we parse it quickly
-		info, _, _ := pdf.Parse(path, hash)
-		if info != nil {
-			books = append(books, tui.Book{Info: info, Cover: cover})
-		}
+	// --- THE WORKER POOL ---
+	type result struct {
+		book tui.Book
 	}
 
-	// Launch the TUI using the 'tea' alias
+	jobs := make(chan string, len(files))
+	results := make(chan result, len(files))
+
+	// Use all available CPU cores for maximum parsing speed
+	workerCount := runtime.NumCPU()
+	var wg sync.WaitGroup
+
+	slog.Info("Starting worker pool to parse PDFs...", "workers", workerCount, "files", len(files))
+	startTime := time.Now()
+
+	for w := 0; w < workerCount; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for path := range jobs {
+				hash, err := cache.HashFile(path)
+				if err != nil {
+					continue
+				}
+
+				var cover []byte
+				if cached, err := cache.LoadCover(hash); err == nil {
+					// CACHE HIT: Load image instantly, parse only text metadata
+					cover = cached
+					info, _ := pdf.ParseMetadataOnly(path, hash)
+					if info != nil {
+						results <- result{book: tui.Book{Info: info, Cover: cover}}
+					}
+					continue
+				}
+
+				// CACHE MISS: Full parse and save
+				info, c, err := pdf.Parse(path, hash)
+				if err == nil && c != nil {
+					cache.SaveCover(hash, c)
+					cover = c
+				}
+				if info != nil {
+					results <- result{book: tui.Book{Info: info, Cover: cover}}
+				}
+			}
+		}()
+	}
+
+	// Feed the workers
+	for _, f := range files {
+		jobs <- f
+	}
+	close(jobs)
+
+	// Wait for all parsing to finish
+	wg.Wait()
+	close(results)
+
+	var books []tui.Book
+	for r := range results {
+		books = append(books, r.book)
+	}
+
+	slog.Info("Parsing complete", "duration", time.Since(startTime), "books", len(books))
+
+	// Launch TUI
 	p := tea.NewProgram(
 		tui.InitialModel(books),
-		tea.WithAltScreen(),       // Use the alternate screen buffer
-		tea.WithMouseCellMotion(), // Enable mouse tracking
+		tea.WithAltScreen(),
+		tea.WithMouseCellMotion(),
 	)
 
 	if _, err := p.Run(); err != nil {

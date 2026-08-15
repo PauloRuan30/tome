@@ -2,15 +2,14 @@ package pdf
 
 import (
 	"bytes"
-	"encoding/base64"
 	"fmt"
-	"image/jpeg"
+	"image"
+	_ "image/jpeg" // Keep for potential external images
+	_ "image/png"  // Register PNG decoder
 	"os"
 	"strings"
 )
 
-// SupportsKitty detects terminals with the Kitty Graphics Protocol.
-// NOTE: Konsole does NOT support it — it correctly uses the ANSI fallback.
 func SupportsKitty() bool {
 	term := os.Getenv("TERM")
 	termProgram := os.Getenv("TERM_PROGRAM")
@@ -19,42 +18,9 @@ func SupportsKitty() bool {
 		strings.Contains(termProgram, "wezterm")
 }
 
-// KittyImage encodes a JPEG per the Kitty Graphics Protocol:
-//   - payloads > 4096 bytes MUST be chunked (m=1 ... m=0)
-//   - q=2 silences terminal ACK responses (keeps Bubble Tea's input clean)
-//   - trailing spaces reserve the layout slot in the TUI
-func KittyImage(imgData []byte, cols, rows int) string {
-	b64 := base64.StdEncoding.EncodeToString(imgData)
-
-	var sb strings.Builder
-	const chunk = 4096
-	for i := 0; i < len(b64); i += chunk {
-		end := min(i+chunk, len(b64))
-		m := 0 // 0 = final chunk
-		if end < len(b64) {
-			m = 1 // 1 = more chunks follow
-		}
-		if i == 0 {
-			sb.WriteString(fmt.Sprintf(
-				"\x1b_Ga=T,f=100,c=%d,r=%d,q=2,m=%d;%s\x1b\\", cols, rows, m, b64[i:end]))
-		} else {
-			sb.WriteString(fmt.Sprintf("\x1b_Gm=%d;%s\x1b\\", m, b64[i:end]))
-		}
-	}
-
-	// Layout placeholder so Lipgloss reserves the exact image area
-	for y := 0; y < rows; y++ {
-		sb.WriteString(strings.Repeat(" ", cols))
-		if y < rows-1 {
-			sb.WriteString("\n")
-		}
-	}
-	return sb.String()
-}
-
-// ANSIBlockArt generates high-density Unicode block art for standard terminals.
+// ANSIBlockArt uses image.Decode which auto-detects the format (PNG/JPEG).
 func ANSIBlockArt(imgData []byte, cols int) string {
-	img, err := jpeg.Decode(bytes.NewReader(imgData))
+	img, _, err := image.Decode(bytes.NewReader(imgData))
 	if err != nil {
 		return "[Image Decode Error]"
 	}

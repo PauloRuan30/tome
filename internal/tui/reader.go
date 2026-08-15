@@ -13,14 +13,13 @@ import (
 	"github.com/PauloRuan30/tome/internal/progress"
 )
 
-// ReaderClosedMsg tells the parent Model to return to the grid.
 type ReaderClosedMsg struct{}
 
 type readMode int
 
 const (
-	readText   readMode = iota // extracted text — actually readable (default)
-	readVisual                 // block-art page preview
+	readText readMode = iota
+	readVisual
 )
 
 type ReaderModel struct {
@@ -35,28 +34,30 @@ type ReaderModel struct {
 	jumpMode bool
 	jumpBuf  string
 
-	// text mode state
 	lines      []string
 	scrollLine int
 	textCache  map[int][]string
-
-	// visual mode state
-	pageCache map[string]string
+	pageCache  map[string]string
+	paintSig   string
 }
 
 func NewReaderModel(t *progress.Tracker) ReaderModel {
 	return ReaderModel{tracker: t, pageCache: map[string]string{}, textCache: map[int][]string{}}
 }
 
-// Open loads a book and resumes from the last saved page.
 func (m ReaderModel) Open(book Book) ReaderModel {
 	m.book = book
 	m.pageCache = map[string]string{}
 	m.textCache = map[int][]string{}
 	m.jumpMode = false
 	m.jumpBuf = ""
-	m.mode = readText
-	m.dual = false
+	m.paintSig = ""
+	// Pixel terminals default to Okular mode; the rest get readable text.
+	if pdf.SupportsKitty() {
+		m.mode = readVisual
+	} else {
+		m.mode = readText
+	}
 
 	start := 0
 	if p := m.tracker.Get(book.Info.Hash); p.Total == book.Info.PageCount && p.LastPage > 0 {
@@ -105,7 +106,6 @@ func (m *ReaderModel) loadText() {
 	m.textCache[m.page] = m.lines
 }
 
-// wrapText reflows raw page text to the terminal width.
 func wrapText(s string, width int) []string {
 	if width < 10 {
 		width = 80
@@ -136,6 +136,33 @@ func wrapText(s string, width int) []string {
 	return out
 }
 
+// visualGeom: deterministic layout shared by View AND the painter.
+// row0=header, row1=blank, rows 2..2+rows-1 = page, then footer.
+func (m ReaderModel) visualGeom() (rows, cols, startCol, startRow int) {
+	rows = m.height - 5
+	if rows < 5 {
+		rows = 5
+	}
+	cols = int(float64(rows) / 0.7)
+	if m.dual {
+		cols = min(cols, (m.width-8)/2)
+	} else {
+		cols = min(cols, m.width-8)
+	}
+	if cols < 20 {
+		cols = 20
+	}
+	contentW := cols
+	if m.dual {
+		contentW = cols*2 + 2
+	}
+	startCol = (m.width - contentW) / 2
+	if startCol < 0 {
+		startCol = 0
+	}
+	return rows, cols, startCol, 2
+}
+
 func (m ReaderModel) pageArt(page, cols int) string {
 	key := fmt.Sprintf("%d-%d", page, cols)
 	if art, ok := m.pageCache[key]; ok {
@@ -150,122 +177,160 @@ func (m ReaderModel) pageArt(page, cols int) string {
 	return art
 }
 
-func (m *ReaderModel) step(n int) {
-	delta := n
-	if m.dual {
-		delta = n * 2
+// paintCmd renders the page(s) at 150 DPI and paints them after the frame.
+func (m ReaderModel) paintCmd() tea.Cmd {
+	file := m.book.Info.FilePath
+	page, dual := m.page, m.dual
+	rows, cols, startCol, startRow := m.visualGeom()
+	return func() tea.Msg {
+		time.Sleep(25 * time.Millisecond)
+		pdf.ClearAllImages()
+		if buf, err := pdf.RenderPage(file, page); err == nil && buf != nil {
+			_ = pdf.PaintImage(buf.Bytes(), startRow, startCol, cols, rows)
+		}
+		if dual {
+			if buf, err := pdf.RenderPage(file, page+1); err == nil && buf != nil {
+				_ = pdf.PaintImage(buf.Bytes(), startRow, startCol+cols+2, cols, rows)
+			}
+		}
+		return nil
 	}
-	m.gotoPage(m.page + delta)
+}
+
+func indent(block string, n int) string {
+	pad := strings.Repeat(" ", n)
+	lines := strings.Split(block, "\n")
+	for i, l := range lines {
+		lines[i] = pad + l
+	}
+	return strings.Join(lines, "\n")
+}
+
+func joinSideBySide(left, right string, startCol int) string {
+	ls, rs := strings.Split(left, "\n"), strings.Split(right, "\n")
+	pad := strings.Repeat(" ", startCol)
+	var sb strings.Builder
+	for i := 0; i < max(len(ls), len(rs)); i++ {
+		l, r := "", ""
+		if i < len(ls) {
+			l = ls[i]
+		}
+		if i < len(rs) {
+			r = rs[i]
+		}
+		sb.WriteString(pad + l + "  " + r + "\n")
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
 }
 
 func (m ReaderModel) Update(msg tea.Msg) (ReaderModel, tea.Cmd) {
 	if ws, ok := msg.(tea.WindowSizeMsg); ok {
 		if ws.Width != m.width || ws.Height != m.height {
 			m.width, m.height = ws.Width, ws.Height
-			m.textCache = map[int][]string{} // rewrap for new width
+			m.textCache = map[int][]string{}
 			m.pageCache = map[string]string{}
 			if m.book.Info != nil && m.mode == readText {
 				m.loadText()
 			}
 		}
-		return m, nil
-	}
-
-	if ms, ok := msg.(tea.MouseMsg); ok && ms.Action == tea.MouseActionPress {
+	} else if ms, ok := msg.(tea.MouseMsg); ok && ms.Action == tea.MouseActionPress {
 		switch ms.Button {
 		case tea.MouseButtonWheelDown:
 			if m.mode == readText {
 				m.scrollLine += 3
 			} else {
-				m.step(1)
+				m.gotoPage(m.page + m.stepDelta())
 			}
 		case tea.MouseButtonWheelUp:
 			if m.mode == readText {
 				m.scrollLine -= 3
 			} else {
-				m.step(-1)
+				m.gotoPage(m.page - m.stepDelta())
 			}
 		}
-		return m, nil
-	}
-
-	key, ok := msg.(tea.KeyMsg)
-	if !ok {
-		return m, nil
-	}
-
-	// page-jump prompt
-	if m.jumpMode {
-		switch key.String() {
-		case "esc":
-			m.jumpMode, m.jumpBuf = false, ""
-		case "enter":
-			if n, err := strconv.Atoi(m.jumpBuf); err == nil && n >= 1 && n <= m.book.Info.PageCount {
-				m.gotoPage(n - 1)
+	} else if key, ok := msg.(tea.KeyMsg); ok {
+		if m.jumpMode {
+			switch key.String() {
+			case "esc":
+				m.jumpMode, m.jumpBuf = false, ""
+			case "enter":
+				if n, err := strconv.Atoi(m.jumpBuf); err == nil && n >= 1 && n <= m.book.Info.PageCount {
+					m.gotoPage(n - 1)
+				}
+				m.jumpMode, m.jumpBuf = false, ""
+			case "backspace":
+				if len(m.jumpBuf) > 0 {
+					m.jumpBuf = m.jumpBuf[:len(m.jumpBuf)-1]
+				}
+			default:
+				if len(key.String()) == 1 && key.String() >= "0" && key.String() <= "9" {
+					m.jumpBuf += key.String()
+				}
 			}
-			m.jumpMode, m.jumpBuf = false, ""
-		case "backspace":
-			if len(m.jumpBuf) > 0 {
-				m.jumpBuf = m.jumpBuf[:len(m.jumpBuf)-1]
-			}
-		default:
-			if len(key.String()) == 1 && key.String() >= "0" && key.String() <= "9" {
-				m.jumpBuf += key.String()
+		} else {
+			switch key.String() {
+			case "q", "esc":
+				m.save()
+				pdf.ClearAllImages()
+				return m, func() tea.Msg { return ReaderClosedMsg{} }
+			case "v":
+				if m.mode == readText {
+					m.mode = readVisual
+				} else {
+					m.mode = readText
+					m.loadText()
+				}
+			case "d":
+				m.dual = !m.dual
+				m.mode = readVisual
+				m.pageCache = map[string]string{}
+			case ":":
+				m.jumpMode, m.jumpBuf = true, ""
+			case "j", "down":
+				if m.mode == readText {
+					m.scrollLine++
+				} else {
+					m.gotoPage(m.page + m.stepDelta())
+				}
+			case "k", "up":
+				if m.mode == readText {
+					m.scrollLine--
+				} else {
+					m.gotoPage(m.page - m.stepDelta())
+				}
+			case "n", "right", " ", "enter":
+				if m.mode == readText {
+					m.gotoPage(m.page + 1)
+				} else {
+					m.gotoPage(m.page + m.stepDelta())
+				}
+			case "p", "left":
+				if m.mode == readText {
+					m.gotoPage(m.page - 1)
+				} else {
+					m.gotoPage(m.page - m.stepDelta())
+				}
 			}
 		}
-		return m, nil
 	}
 
-	switch key.String() {
-	case "q", "esc":
-		m.save()
-		return m, func() tea.Msg { return ReaderClosedMsg{} }
-
-	case "v": // toggle TEXT <-> VISUAL
-		if m.mode == readText {
-			m.mode = readVisual
-		} else {
-			m.mode = readText
-			m.loadText()
-		}
-
-	case "d": // dual-page (visual mode)
-		m.dual = !m.dual
-		m.mode = readVisual
-		m.pageCache = map[string]string{}
-
-	case ":":
-		m.jumpMode, m.jumpBuf = true, ""
-
-	// scrolling (text) / page flip (visual)
-	case "j", "down":
-		if m.mode == readText {
-			m.scrollLine++
-		} else {
-			m.step(1)
-		}
-	case "k", "up":
-		if m.mode == readText {
-			m.scrollLine--
-		} else {
-			m.step(-1)
-		}
-
-	// page turning
-	case "n", "right", " ", "enter":
-		if m.mode == readText {
-			m.gotoPage(m.page + 1)
-		} else {
-			m.step(1)
-		}
-	case "p", "left":
-		if m.mode == readText {
-			m.gotoPage(m.page - 1)
-		} else {
-			m.step(-1)
+	// Repaint pixels whenever page/geometry changes (Kitty only)
+	var cmd tea.Cmd
+	if pdf.SupportsKitty() && m.book.Info != nil && m.mode == readVisual {
+		sig := fmt.Sprintf("%d|%t|%d|%d", m.page, m.dual, m.width, m.height)
+		if sig != m.paintSig {
+			m.paintSig = sig
+			cmd = m.paintCmd()
 		}
 	}
-	return m, nil
+	return m, cmd
+}
+
+func (m ReaderModel) stepDelta() int {
+	if m.dual {
+		return 2
+	}
+	return 1
 }
 
 func (m ReaderModel) View() string {
@@ -278,8 +343,9 @@ func (m ReaderModel) View() string {
 	if m.mode == readVisual {
 		tag = "VISUAL"
 	}
-	header := TitleStyle.Render(fmt.Sprintf("[%s] %s — p.%d/%d (%d%%)",
-		tag, m.book.Info.Title, m.page+1, m.book.Info.PageCount, pct))
+	header := lipgloss.Place(m.width, 1, lipgloss.Center, lipgloss.Top,
+		TitleStyle.Render(fmt.Sprintf("[%s] %s — p.%d/%d (%d%%)",
+			tag, m.book.Info.Title, m.page+1, m.book.Info.PageCount, pct)))
 
 	var content, footer string
 
@@ -292,32 +358,27 @@ func (m ReaderModel) View() string {
 		if maxScroll < 0 {
 			maxScroll = 0
 		}
-		if m.scrollLine < 0 {
-			m.scrollLine = 0
-		}
-		if m.scrollLine > maxScroll {
-			m.scrollLine = maxScroll
-		}
+		m.scrollLine = min(max(m.scrollLine, 0), maxScroll)
 		end := min(m.scrollLine+visible, len(m.lines))
 		content = strings.Join(m.lines[m.scrollLine:end], "\n")
 		footer = fmt.Sprintf("[j/k|wheel] scroll  [n/p|←/→] page  [v] visual  [:] jump  [q] back  · line %d/%d",
 			m.scrollLine+1, len(m.lines))
 	} else {
-		rows := m.height - 4
-		cols := int(float64(rows) / 0.7)
-		if m.dual {
-			cols = min(cols, (m.width/2)-6)
+		rows, cols, startCol, _ := m.visualGeom()
+		hasSecond := m.dual && m.page+1 < m.book.Info.PageCount
+		if pdf.SupportsKitty() {
+			// Stable placeholders; pixels arrive out-of-band.
+			if hasSecond {
+				content = joinSideBySide(pdf.Placeholder(cols, rows), pdf.Placeholder(cols, rows), startCol)
+			} else {
+				content = indent(pdf.Placeholder(cols, rows), startCol)
+			}
 		} else {
-			cols = min(cols, m.width-4)
-		}
-		if cols < 20 {
-			cols = 20
-		}
-		if m.dual && m.page+1 < m.book.Info.PageCount {
-			content = lipgloss.JoinHorizontal(lipgloss.Top,
-				m.pageArt(m.page, cols), "  ", m.pageArt(m.page+1, cols))
-		} else {
-			content = m.pageArt(m.page, cols)
+			if hasSecond {
+				content = joinSideBySide(m.pageArt(m.page, cols), m.pageArt(m.page+1, cols), startCol)
+			} else {
+				content = indent(m.pageArt(m.page, cols), startCol)
+			}
 		}
 		footer = "[j/k|←/→|wheel] page  [d] dual  [v] text  [:] jump  [q] back"
 	}
@@ -326,6 +387,5 @@ func (m ReaderModel) View() string {
 		footer = "Jump to page: " + m.jumpBuf + "█  (enter=go esc=cancel)"
 	}
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center,
-		lipgloss.JoinVertical(lipgloss.Center, header, content, footer))
+	return strings.Join([]string{header, "", content, "", footer}, "\n")
 }

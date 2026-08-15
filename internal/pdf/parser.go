@@ -2,7 +2,7 @@ package pdf
 
 import (
 	"bytes"
-	"image/jpeg"
+	"image/png" // Switched to PNG
 	"path/filepath"
 	"strings"
 
@@ -37,8 +37,6 @@ func extractInfo(doc *fitz.Document, filePath, hash string) *BookInfo {
 	return info
 }
 
-// Parse renders the cover at 72 DPI. That's plenty for a terminal
-// thumbnail and ~10x faster than the 300 DPI default.
 func Parse(filePath string, hash string) (*BookInfo, []byte, error) {
 	doc, err := fitz.New(filePath)
 	if err != nil {
@@ -54,11 +52,10 @@ func Parse(filePath string, hash string) (*BookInfo, []byte, error) {
 	}
 
 	var buf bytes.Buffer
-	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 80})
+	png.Encode(&buf, img) // Encode as PNG!
 	return info, buf.Bytes(), nil
 }
 
-// ParseMetadataOnly skips image rendering entirely (used on cache hits).
 func ParseMetadataOnly(filePath string, hash string) (*BookInfo, error) {
 	doc, err := fitz.New(filePath)
 	if err != nil {
@@ -68,7 +65,6 @@ func ParseMetadataOnly(filePath string, hash string) (*BookInfo, error) {
 	return extractInfo(doc, filePath, hash), nil
 }
 
-// RenderPage keeps a higher DPI for the actual Reader (Step 5).
 func RenderPage(filePath string, pageNum int) (*bytes.Buffer, error) {
 	doc, err := fitz.New(filePath)
 	if err != nil {
@@ -80,13 +76,13 @@ func RenderPage(filePath string, pageNum int) (*bytes.Buffer, error) {
 		return nil, nil
 	}
 
-	img, err := doc.ImageDPI(pageNum, 110)
+	img, err := doc.ImageDPI(pageNum, 150)
 	if err != nil {
 		return nil, err
 	}
 
 	var buf bytes.Buffer
-	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90})
+	png.Encode(&buf, img) // Encode as PNG!
 	return &buf, nil
 }
 

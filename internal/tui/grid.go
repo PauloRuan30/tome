@@ -3,6 +3,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -16,27 +17,20 @@ type GridModel struct {
 	selected  int
 	width     int
 	height    int
-	scrollRow int // first visible grid row (the viewport)
+	scrollRow int
 
 	artCache map[string]string
+	paintSig string // last painted viewport signature
 }
 
 func NewGridModel(books []Book) GridModel {
 	return GridModel{books: books, cols: 3, artCache: make(map[string]string)}
 }
 
-func (m *GridModel) SetBooks(books []Book) {
-	m.books = books
-	m.scrollRow = 0
-	if m.selected >= len(books) {
-		m.selected = len(books) - 1
-	}
-	if m.selected < 0 {
-		m.selected = 0
-	}
-}
-
 func (m GridModel) Selected() int { return m.selected }
+
+// InvalidatePaint forces a repaint on the next update (used after reader exits).
+func (m *GridModel) InvalidatePaint() { m.paintSig = "" }
 
 func (m GridModel) coverCols() int {
 	c := (m.width / m.cols) - 8
@@ -51,7 +45,6 @@ func (m GridModel) coverCols() int {
 func (m GridModel) coverRows() int { return int(float64(m.coverCols()) * 0.7) }
 func (m GridModel) cellH() int     { return m.coverRows() + 5 }
 func (m GridModel) totalRows() int { return (len(m.books) + m.cols - 1) / m.cols }
-
 func (m GridModel) visibleRows() int {
 	v := m.height / m.cellH()
 	if v < 1 {
@@ -59,7 +52,6 @@ func (m GridModel) visibleRows() int {
 	}
 	return v
 }
-
 func (m GridModel) maxScroll() int {
 	max := m.totalRows() - m.visibleRows()
 	if max < 0 {
@@ -67,7 +59,6 @@ func (m GridModel) maxScroll() int {
 	}
 	return max
 }
-
 func (m GridModel) clampScroll() GridModel {
 	if m.scrollRow < 0 {
 		m.scrollRow = 0
@@ -77,8 +68,6 @@ func (m GridModel) clampScroll() GridModel {
 	}
 	return m
 }
-
-// keepSelectedVisible makes keyboard navigation follow the selection.
 func (m GridModel) keepSelectedVisible() GridModel {
 	row := m.selected / m.cols
 	if row < m.scrollRow {
@@ -90,22 +79,34 @@ func (m GridModel) keepSelectedVisible() GridModel {
 	return m.clampScroll()
 }
 
+// SetBooks replaces the visible library (search filter).
+func (m *GridModel) SetBooks(books []Book) {
+	m.books = books
+	m.scrollRow = 0
+	if m.selected >= len(m.books) {
+		m.selected = len(m.books) - 1
+	}
+	if m.selected < 0 {
+		m.selected = 0
+	}
+}
+
+// coverArt: ANSI art for classic terminals; stable space placeholder for
+// Kitty (the real image is painted out-of-band by paintCmd).
 func (m GridModel) coverArt(book Book, cols int) string {
+	if pdf.SupportsKitty() {
+		return pdf.Placeholder(cols, m.coverRows())
+	}
 	key := fmt.Sprintf("%s-%d", book.Info.Hash, cols)
 	if art, ok := m.artCache[key]; ok {
 		return art
 	}
-
 	var art string
-	switch {
-	case book.Cover == nil:
+	if book.Cover == nil {
 		art = lipgloss.Place(cols, m.coverRows(), lipgloss.Center, lipgloss.Center, "[No Cover]")
-	case pdf.SupportsKitty():
-		art = pdf.KittyImage(book.Cover, cols, m.coverRows())
-	default:
+	} else {
 		art = pdf.ANSIBlockArt(book.Cover, cols)
 	}
-
 	if len(m.artCache) > 64 {
 		m.artCache = make(map[string]string)
 	}
@@ -113,7 +114,42 @@ func (m GridModel) coverArt(book Book, cols int) string {
 	return art
 }
 
+// paintCmd snapshots the visible viewport and paints covers after the frame.
+func (m GridModel) paintCmd() tea.Cmd {
+	type slot struct {
+		cover    []byte
+		row, col int
+		c, r     int
+	}
+	var slots []slot
+	cellW := m.width / m.cols
+	first := m.scrollRow * m.cols
+	last := min((m.scrollRow+m.visibleRows())*m.cols, len(m.books))
+	for i := first; i < last; i++ {
+		if m.books[i].Cover == nil {
+			continue
+		}
+		slots = append(slots, slot{
+			cover: m.books[i].Cover,
+			row:   (i/m.cols-m.scrollRow)*m.cellH() + 2, // border+padding
+			col:   (i%m.cols)*cellW + 3,
+			c:     m.coverCols(),
+			r:     m.coverRows(),
+		})
+	}
+	return func() tea.Msg {
+		time.Sleep(25 * time.Millisecond) // let the text frame land first
+		pdf.ClearAllImages()
+		for _, s := range slots {
+			_ = pdf.PaintImage(s.cover, s.row, s.col, s.c, s.r)
+		}
+		return nil
+	}
+}
+
 func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
+	var cmd tea.Cmd
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		switch {
@@ -126,7 +162,7 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 		default:
 			m.cols = 1
 		}
-		return m.clampScroll(), nil
+		m = m.clampScroll()
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -147,7 +183,7 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 				m.selected += m.cols
 			}
 		}
-		return m.keepSelectedVisible(), nil
+		m = m.keepSelectedVisible()
 
 	case tea.MouseMsg:
 		if msg.Action != tea.MouseActionPress {
@@ -155,7 +191,7 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 		}
 		switch msg.Button {
 		case tea.MouseButtonWheelDown:
-			m.scrollRow++ // wheel scrolls the VIEW now
+			m.scrollRow++
 		case tea.MouseButtonWheelUp:
 			m.scrollRow--
 		case tea.MouseButtonLeft:
@@ -166,15 +202,24 @@ func (m GridModel) Update(msg tea.Msg) (GridModel, tea.Cmd) {
 			if col >= m.cols {
 				return m, nil
 			}
-			row := m.scrollRow + msg.Y/m.cellH() // click maps through the viewport
+			row := m.scrollRow + msg.Y/m.cellH()
 			idx := row*m.cols + col
 			if idx >= 0 && idx < len(m.books) {
 				m.selected = idx
 			}
 		}
-		return m.clampScroll(), nil
+		m = m.clampScroll()
 	}
-	return m, nil
+
+	// Repaint covers whenever the visible viewport changes (Kitty only)
+	if pdf.SupportsKitty() {
+		sig := fmt.Sprintf("%d|%d|%d|%d|%d", m.scrollRow, m.cols, m.width, m.height, len(m.books))
+		if sig != m.paintSig {
+			m.paintSig = sig
+			cmd = m.paintCmd()
+		}
+	}
+	return m, cmd
 }
 
 func (m GridModel) View() string {
@@ -184,12 +229,8 @@ func (m GridModel) View() string {
 	m = m.clampScroll()
 	coverCols := m.coverCols()
 
-	// Render ONLY the visible slice of the library (the viewport)
 	first := m.scrollRow * m.cols
-	last := (m.scrollRow + m.visibleRows()) * m.cols
-	if last > len(m.books) {
-		last = len(m.books)
-	}
+	last := min((m.scrollRow+m.visibleRows())*m.cols, len(m.books))
 
 	var cells []string
 	for i := first; i < last; i++ {

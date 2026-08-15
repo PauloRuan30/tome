@@ -13,6 +13,7 @@ import (
 	"github.com/PauloRuan30/tome/internal/cache"
 	"github.com/PauloRuan30/tome/internal/config"
 	"github.com/PauloRuan30/tome/internal/pdf"
+	"github.com/PauloRuan30/tome/internal/progress"
 	"github.com/PauloRuan30/tome/internal/tui"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -116,8 +117,10 @@ func main() {
 	slog.Info("Parsing complete", "duration", time.Since(startTime), "books", len(books))
 
 	// Launch TUI
+	tracker := progress.NewTracker()
+
 	p := tea.NewProgram(
-		tui.InitialModel(books),
+		tui.InitialModel(books, tracker),
 		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)

@@ -89,3 +89,16 @@ func RenderPage(filePath string, pageNum int) (*bytes.Buffer, error) {
 	jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90})
 	return &buf, nil
 }
+
+func PageText(filePath string, pageNum int) (string, error) {
+	doc, err := fitz.New(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer doc.Close()
+
+	if pageNum < 0 || pageNum >= doc.NumPage() {
+		return "", nil
+	}
+	return doc.Text(pageNum)
+}

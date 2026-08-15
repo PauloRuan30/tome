@@ -25,6 +25,17 @@ func NewGridModel(books []Book) GridModel {
 	return GridModel{books: books, cols: 3, artCache: make(map[string]string)}
 }
 
+func (m *GridModel) SetBooks(books []Book) {
+	m.books = books
+	m.scrollRow = 0
+	if m.selected >= len(books) {
+		m.selected = len(books) - 1
+	}
+	if m.selected < 0 {
+		m.selected = 0
+	}
+}
+
 func (m GridModel) Selected() int { return m.selected }
 
 func (m GridModel) coverCols() int {

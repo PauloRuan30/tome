@@ -10,6 +10,8 @@ import (
 	"github.com/PauloRuan30/tome/internal/cache"
 	"github.com/PauloRuan30/tome/internal/config"
 	"github.com/PauloRuan30/tome/internal/pdf"
+	"github.com/PauloRuan30/tome/internal/tui"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 var (
@@ -30,8 +32,7 @@ func main() {
 		return
 	}
 
-	cfg := config.Load()
-	_ = cfg // Will be used in later steps
+	_ = config.Load()
 
 	if *cleanFlag {
 		slog.Info("Cleaning cache directory...", "path", cache.CacheDir())
@@ -39,43 +40,45 @@ func main() {
 		return
 	}
 
-	// 1. Scan directory for PDFs
 	files, err := filepath.Glob(filepath.Join(*dirFlag, "*.pdf"))
 	if err != nil {
 		slog.Error("Failed to read directory", "err", err)
 		os.Exit(1)
 	}
 
-	slog.Info("Scanning for PDFs...", "dir", *dirFlag, "count", len(files))
-
-	// 2. Process each PDF
+	var books []tui.Book
 	for _, path := range files {
 		hash, err := cache.HashFile(path)
 		if err != nil {
-			slog.Warn("Failed to hash file", "path", path, "err", err)
 			continue
 		}
 
-		// Check cache first
-		if _, err := cache.LoadCover(hash); err == nil {
-			slog.Info("Loaded from cache", "file", filepath.Base(path))
-			continue
-		}
-
-		// Parse and cache
-		info, cover, err := pdf.Parse(path, hash)
-		if err != nil {
-			slog.Warn("Failed to parse PDF", "path", path, "err", err)
-			continue
-		}
-
-		if cover != nil {
-			cache.SaveCover(hash, cover)
-			slog.Info("Parsed and cached new book", "title", info.Title, "pages", info.PageCount)
+		var cover []byte
+		if cached, err := cache.LoadCover(hash); err == nil {
+			cover = cached
 		} else {
-			slog.Warn("No cover extracted", "title", info.Title)
+			_, cover, _ = pdf.Parse(path, hash)
+			if cover != nil {
+				cache.SaveCover(hash, cover)
+			}
+		}
+
+		// We need the info for the UI, so we parse it quickly
+		info, _, _ := pdf.Parse(path, hash)
+		if info != nil {
+			books = append(books, tui.Book{Info: info, Cover: cover})
 		}
 	}
 
-	slog.Info("Scan complete.")
+	// Launch the TUI using the 'tea' alias
+	p := tea.NewProgram(
+		tui.InitialModel(books),
+		tea.WithAltScreen(),       // Use the alternate screen buffer
+		tea.WithMouseCellMotion(), // Enable mouse tracking
+	)
+
+	if _, err := p.Run(); err != nil {
+		slog.Error("TUI crashed", "err", err)
+		os.Exit(1)
+	}
 }

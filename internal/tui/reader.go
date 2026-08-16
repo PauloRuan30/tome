@@ -129,7 +129,6 @@ func wrapText(s string, width int) []string {
 			out = append(out, "")
 			continue
 		}
-
 		line := ""
 		for _, w := range strings.Fields(raw) {
 			switch {
@@ -149,12 +148,29 @@ func wrapText(s string, width int) []string {
 	return out
 }
 
+func joinSideBySide(left, right string, startCol int) string {
+	ls, rs := strings.Split(left, "\n"), strings.Split(right, "\n")
+	pad := strings.Repeat(" ", startCol)
+	var sb strings.Builder
+	for i := 0; i < max(len(ls), len(rs)); i++ {
+		l, r := "", ""
+		if i < len(ls) {
+			l = ls[i]
+		}
+		if i < len(rs) {
+			r = rs[i]
+		}
+		sb.WriteString(pad + l + "  " + r + "\n")
+	}
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
 func (m ReaderModel) visualGeom() (rows, cols, startCol, startRow int) {
 	rows = m.height - 5
 	if rows < 5 {
 		rows = 5
 	}
-	cols = int(float64(rows) * 2.0 / m.aspect)
+	cols = int(float64(rows) * pdf.CellRatio() / m.aspect)
 	if m.dual {
 		cols = min(cols, (m.width-8)/2)
 	} else {
@@ -217,24 +233,6 @@ func indent(block string, n int) string {
 		lines[i] = pad + l
 	}
 	return strings.Join(lines, "\n")
-}
-
-func joinSideBySide(left, right string, startCol int) string {
-	ls, rs := strings.Split(left, "\n"), strings.Split(right, "\n")
-	pad := strings.Repeat(" ", startCol)
-	var sb strings.Builder
-
-	for i := 0; i < max(len(ls), len(rs)); i++ {
-		l, r := "", ""
-		if i < len(ls) {
-			l = ls[i]
-		}
-		if i < len(rs) {
-			r = rs[i]
-		}
-		sb.WriteString(pad + l + "  " + r + "\n")
-	}
-	return strings.TrimSuffix(sb.String(), "\n")
 }
 
 func (m ReaderModel) Update(msg tea.Msg) (ReaderModel, tea.Cmd) {

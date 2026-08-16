@@ -44,6 +44,7 @@ func main() {
 	books := loadLibrary(*dirFlag)
 	tracker := progress.NewTracker()
 
+	pdf.ProbeCellSize()
 	p := tea.NewProgram(
 		tui.InitialModel(books, tracker),
 		tea.WithAltScreen(),

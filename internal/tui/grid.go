@@ -131,18 +131,25 @@ func (m GridModel) paintCmd() tea.Cmd {
 		}
 		slots = append(slots, slot{
 			cover: m.books[i].Cover,
-			row:   (i/m.cols-m.scrollRow)*m.cellH() + 2, // border+padding
+			row:   (i/m.cols-m.scrollRow)*m.cellH() + 2,
 			col:   (i%m.cols)*cellW + 3,
 			c:     m.coverCols(),
 			r:     m.coverRows(),
 		})
 	}
 	return func() tea.Msg {
-		time.Sleep(25 * time.Millisecond) // let the text frame land first
-		pdf.ClearAllImages()
+		time.Sleep(25 * time.Millisecond)
+		specs := make([]pdf.PageSpec, 0, len(slots))
 		for _, s := range slots {
-			_ = pdf.PaintImage(s.cover, s.row, s.col, s.c, s.r)
+			specs = append(specs, pdf.PageSpec{
+				Data: s.cover,
+				Row:  s.row,
+				Col:  s.col,
+				Cols: s.c,
+				Rows: s.r,
+			})
 		}
+		pdf.Repaint(specs)
 		return nil
 	}
 }

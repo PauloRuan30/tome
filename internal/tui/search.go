@@ -10,17 +10,18 @@ func (m *SearchModel) Reset()        { m.query = "" }
 
 func (m SearchModel) Update(msg tea.Msg) (SearchModel, tea.Cmd) {
 	if key, ok := msg.(tea.KeyMsg); ok {
-		switch key.String() {
-		case "backspace":
-			if len(m.query) > 0 {
-				m.query = m.query[:len(m.query)-1]
+		switch key.Type {
+		case tea.KeyBackspace:
+
+			runes := []rune(m.query)
+			if len(runes) > 0 {
+				m.query = string(runes[:len(runes)-1])
 			}
-		case "space":
+		case tea.KeyRunes:
+			// Appends all typed or pasted runes
+			m.query += string(key.Runes)
+		case tea.KeySpace:
 			m.query += " "
-		default:
-			if len(key.String()) == 1 {
-				m.query += key.String()
-			}
 		}
 	}
 	return m, nil

@@ -6,6 +6,9 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 var (
@@ -94,4 +97,50 @@ func Placeholder(cols, rows int) string {
 		lines[i] = line
 	}
 	return strings.Join(lines, "\n")
+}
+
+var cellRatio = 2.0
+
+func CellRatio() float64 { return cellRatio }
+
+// ProbeCellSize queries the terminal (CSI 16 t) for the real cell pixel
+// size so page geometry is exact instead of assumed. Call once at startup.
+func ProbeCellSize() {
+	if !SupportsKitty() {
+		return
+	}
+	tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil {
+		return
+	}
+	defer tty.Close()
+
+	fd := int(tty.Fd())
+	old, err := unix.IoctlGetTermios(fd, unix.TCGETS)
+	if err != nil {
+		return
+	}
+	raw := *old
+	raw.Lflag &^= unix.ICANON | unix.ECHO
+	if err := unix.IoctlSetTermios(fd, unix.TCSETS, &raw); err != nil {
+		return
+	}
+	defer unix.IoctlSetTermios(fd, unix.TCSETS, old) // restore cooked mode
+
+	fmt.Fprint(tty, "\x1b[16t")
+
+	ch := make(chan string, 1)
+	go func() {
+		buf := make([]byte, 64)
+		n, _ := tty.Read(buf)
+		ch <- string(buf[:n])
+	}()
+	select {
+	case resp := <-ch:
+		var h, w float64
+		if _, err := fmt.Sscanf(resp, "\x1b[6;%f;%ft", &h, &w); err == nil && w > 0 {
+			cellRatio = h / w
+		}
+	case <-time.After(300 * time.Millisecond):
+	}
 }

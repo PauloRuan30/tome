@@ -1,16 +1,17 @@
 package tui
 
 import (
+	"bytes"
 	"fmt"
+	"image"
 	"strconv"
 	"strings"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-
 	"github.com/PauloRuan30/tome/internal/pdf"
 	"github.com/PauloRuan30/tome/internal/progress"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 type ReaderClosedMsg struct{}
@@ -23,26 +24,29 @@ const (
 )
 
 type ReaderModel struct {
-	tracker *progress.Tracker
-	book    Book
-	page    int
-	dual    bool
-	mode    readMode
-	width   int
-	height  int
-
-	jumpMode bool
-	jumpBuf  string
-
+	tracker    *progress.Tracker
+	book       Book
+	page       int
+	dual       bool
+	mode       readMode
+	width      int
+	height     int
+	jumpMode   bool
+	jumpBuf    string
 	lines      []string
 	scrollLine int
 	textCache  map[int][]string
 	pageCache  map[string]string
 	paintSig   string
+	aspect     float64
 }
 
 func NewReaderModel(t *progress.Tracker) ReaderModel {
-	return ReaderModel{tracker: t, pageCache: map[string]string{}, textCache: map[int][]string{}}
+	return ReaderModel{
+		tracker:   t,
+		pageCache: map[string]string{},
+		textCache: map[int][]string{},
+	}
 }
 
 func (m ReaderModel) Open(book Book) ReaderModel {
@@ -52,7 +56,14 @@ func (m ReaderModel) Open(book Book) ReaderModel {
 	m.jumpMode = false
 	m.jumpBuf = ""
 	m.paintSig = ""
-	// Pixel terminals default to Okular mode; the rest get readable text.
+	// Real page aspect from the cover (kills the A4 stretch assumption).
+	m.aspect = 1.414
+	if book.Cover != nil {
+		if cfg, _, err := image.DecodeConfig(bytes.NewReader(book.Cover)); err == nil && cfg.Width > 0 {
+			m.aspect = float64(cfg.Height) / float64(cfg.Width)
+		}
+	}
+	// Pixel terminals default to visual mode; others get readable text.
 	if pdf.SupportsKitty() {
 		m.mode = readVisual
 	} else {
@@ -106,6 +117,7 @@ func (m *ReaderModel) loadText() {
 	m.textCache[m.page] = m.lines
 }
 
+// wrapText reflows raw page text to the terminal width.
 func wrapText(s string, width int) []string {
 	if width < 10 {
 		width = 80
@@ -117,6 +129,7 @@ func wrapText(s string, width int) []string {
 			out = append(out, "")
 			continue
 		}
+
 		line := ""
 		for _, w := range strings.Fields(raw) {
 			switch {
@@ -136,14 +149,12 @@ func wrapText(s string, width int) []string {
 	return out
 }
 
-// visualGeom: deterministic layout shared by View AND the painter.
-// row0=header, row1=blank, rows 2..2+rows-1 = page, then footer.
 func (m ReaderModel) visualGeom() (rows, cols, startCol, startRow int) {
 	rows = m.height - 5
 	if rows < 5 {
 		rows = 5
 	}
-	cols = int(float64(rows) / 0.7)
+	cols = int(float64(rows) * 2.0 / m.aspect)
 	if m.dual {
 		cols = min(cols, (m.width-8)/2)
 	} else {
@@ -152,6 +163,7 @@ func (m ReaderModel) visualGeom() (rows, cols, startCol, startRow int) {
 	if cols < 20 {
 		cols = 20
 	}
+
 	contentW := cols
 	if m.dual {
 		contentW = cols*2 + 2
@@ -177,22 +189,23 @@ func (m ReaderModel) pageArt(page, cols int) string {
 	return art
 }
 
-// paintCmd renders the page(s) at 150 DPI and paints them after the frame.
 func (m ReaderModel) paintCmd() tea.Cmd {
 	file := m.book.Info.FilePath
 	page, dual := m.page, m.dual
 	rows, cols, startCol, startRow := m.visualGeom()
+
 	return func() tea.Msg {
 		time.Sleep(25 * time.Millisecond)
-		pdf.ClearAllImages()
+		var specs []pdf.PageSpec
 		if buf, err := pdf.RenderPage(file, page); err == nil && buf != nil {
-			_ = pdf.PaintImage(buf.Bytes(), startRow, startCol, cols, rows)
+			specs = append(specs, pdf.PageSpec{Data: buf.Bytes(), Row: startRow, Col: startCol, Cols: cols, Rows: rows})
 		}
 		if dual {
 			if buf, err := pdf.RenderPage(file, page+1); err == nil && buf != nil {
-				_ = pdf.PaintImage(buf.Bytes(), startRow, startCol+cols+2, cols, rows)
+				specs = append(specs, pdf.PageSpec{Data: buf.Bytes(), Row: startRow, Col: startCol + cols + 2, Cols: cols, Rows: rows})
 			}
 		}
+		pdf.Repaint(specs)
 		return nil
 	}
 }
@@ -210,6 +223,7 @@ func joinSideBySide(left, right string, startCol int) string {
 	ls, rs := strings.Split(left, "\n"), strings.Split(right, "\n")
 	pad := strings.Repeat(" ", startCol)
 	var sb strings.Builder
+
 	for i := 0; i < max(len(ls), len(rs)); i++ {
 		l, r := "", ""
 		if i < len(ls) {
@@ -278,6 +292,8 @@ func (m ReaderModel) Update(msg tea.Msg) (ReaderModel, tea.Cmd) {
 					m.mode = readVisual
 				} else {
 					m.mode = readText
+					m.paintSig = ""
+					pdf.ClearAllImages()
 					m.loadText()
 				}
 			case "d":
@@ -314,16 +330,19 @@ func (m ReaderModel) Update(msg tea.Msg) (ReaderModel, tea.Cmd) {
 		}
 	}
 
-	// Repaint pixels whenever page/geometry changes (Kitty only)
-	var cmd tea.Cmd
-	if pdf.SupportsKitty() && m.book.Info != nil && m.mode == readVisual {
-		sig := fmt.Sprintf("%d|%t|%d|%d", m.page, m.dual, m.width, m.height)
-		if sig != m.paintSig {
-			m.paintSig = sig
-			cmd = m.paintCmd()
-		}
+	return m, m.PaintIfNeeded()
+}
+
+func (m *ReaderModel) PaintIfNeeded() tea.Cmd {
+	if !pdf.SupportsKitty() || m.book.Info == nil || m.mode != readVisual {
+		return nil
 	}
-	return m, cmd
+	sig := fmt.Sprintf("%d|%t|%d|%d", m.page, m.dual, m.width, m.height)
+	if sig == m.paintSig {
+		return nil
+	}
+	m.paintSig = sig
+	return m.paintCmd()
 }
 
 func (m ReaderModel) stepDelta() int {
@@ -343,6 +362,7 @@ func (m ReaderModel) View() string {
 	if m.mode == readVisual {
 		tag = "VISUAL"
 	}
+
 	header := lipgloss.Place(m.width, 1, lipgloss.Center, lipgloss.Top,
 		TitleStyle.Render(fmt.Sprintf("[%s] %s — p.%d/%d (%d%%)",
 			tag, m.book.Info.Title, m.page+1, m.book.Info.PageCount, pct)))
@@ -358,6 +378,7 @@ func (m ReaderModel) View() string {
 		if maxScroll < 0 {
 			maxScroll = 0
 		}
+
 		m.scrollLine = min(max(m.scrollLine, 0), maxScroll)
 		end := min(m.scrollLine+visible, len(m.lines))
 		content = strings.Join(m.lines[m.scrollLine:end], "\n")
@@ -366,8 +387,8 @@ func (m ReaderModel) View() string {
 	} else {
 		rows, cols, startCol, _ := m.visualGeom()
 		hasSecond := m.dual && m.page+1 < m.book.Info.PageCount
+
 		if pdf.SupportsKitty() {
-			// Stable placeholders; pixels arrive out-of-band.
 			if hasSecond {
 				content = joinSideBySide(pdf.Placeholder(cols, rows), pdf.Placeholder(cols, rows), startCol)
 			} else {

@@ -2,15 +2,14 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
 
+	"github.com/PauloRuan30/tome/internal/pdf"
+
+	"github.com/PauloRuan30/tome/internal/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"github.com/PauloRuan30/tome/internal/pdf"
-	"github.com/PauloRuan30/tome/internal/progress"
 )
 
 type Book struct {
@@ -65,17 +64,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.grid.width, m.grid.height = gridWidth, msg.Height-1
 		m.pane.width, m.pane.height = msg.Width-gridWidth, msg.Height-1
 		m.reader.width, m.reader.height = msg.Width, msg.Height
-		var c1, c2, c3 tea.Cmd
-		m.grid, c1 = m.grid.Update(msg)
-		m.pane, c2 = m.pane.Update(msg)
-		m.reader, c3 = m.reader.Update(msg)
-		return m, tea.Batch(c1, c2, c3)
+
+		var cmds []tea.Cmd
+		if m.mode == modeReader {
+			var c tea.Cmd
+			m.reader, c = m.reader.Update(msg)
+			cmds = append(cmds, c)
+		} else {
+			var c1, c2 tea.Cmd
+			m.grid, c1 = m.grid.Update(msg)
+			m.pane, c2 = m.pane.Update(msg)
+			cmds = append(cmds, c1, c2)
+		}
+		return m, tea.Batch(cmds...)
 
 	case ReaderClosedMsg:
 		m.mode = modeGrid
-		m.grid.InvalidatePaint() // force cover repaint
-		m.pane.SetBook(m.currentBooks()[m.selected])
-		return m, nil
+		m.grid.InvalidatePaint()
+		var cmd tea.Cmd
+		m.grid, cmd = m.grid.Update(nil)
+		if books := m.currentBooks(); len(books) > 0 && m.selected < len(books) {
+			m.pane.SetBook(books[m.selected])
+		}
+		return m, cmd
 
 	case tea.KeyMsg:
 		if m.mode == modeGrid {
@@ -90,6 +101,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if books := m.currentBooks(); len(books) > 0 {
 					m.reader = m.reader.Open(books[m.selected])
 					m.mode = modeReader
+					return m, m.reader.PaintIfNeeded()
 				}
 				return m, nil
 			case "o":
@@ -101,12 +113,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeSearch {
 			switch msg.String() {
-			case "esc": // cancel: restore full library
+			case "esc":
 				m.filter = ""
 				m.applyFilter()
 				m.mode = modeGrid
 				return m, nil
-			case "enter": // apply: keep filter, close overlay
+			case "enter":
 				m.filter = m.search.Query()
 				m.applyFilter()
 				m.mode = modeGrid
@@ -127,7 +139,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case modeSearch:
 		m.search, cmd = m.search.Update(msg)
-		m.filter = m.search.Query() // live filtering while typing
+		m.filter = m.search.Query()
 		m.applyFilter()
 	case modeReader:
 		m.reader, cmd = m.reader.Update(msg)
@@ -172,16 +184,22 @@ func (m Model) View() string {
 
 	body := lipgloss.JoinHorizontal(lipgloss.Top, m.grid.View(), m.pane.View())
 
+	barStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("236")).
+		Foreground(lipgloss.Color("255")).
+		Width(m.width)
+
 	var bar string
-	barStyle := lipgloss.NewStyle().Background(lipgloss.Color("236")).Foreground(lipgloss.Color("255"))
 	if m.mode == modeSearch {
-		bar = barStyle.Render(" /search: " + m.search.Query() + "█   (enter=apply  esc=clear)")
+		bar = barStyle.Render(fmt.Sprintf(" 🔍 Search: %s█   (enter=apply  esc=clear)", m.search.Query()))
 	} else {
-		bar = barStyle.Render(fmt.Sprintf(
-			" term:%dx%d (%s) | sel:%d | scroll:%d | books:%d/%d | filter:%q ",
-			m.width, m.height, os.Getenv("TERM"),
-			m.selected, m.grid.scrollRow,
-			len(m.currentBooks()), len(m.allBooks), m.filter))
+		status := fmt.Sprintf(" 📚 %d books", len(m.currentBooks()))
+		if m.filter != "" {
+			status += fmt.Sprintf(" (filtered by: %q)", m.filter)
+		}
+		status += "  |  Press / to search, q to quit"
+		bar = barStyle.Render(status)
 	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, body, bar)
 }
